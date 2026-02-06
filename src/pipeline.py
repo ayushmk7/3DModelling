@@ -11,22 +11,30 @@ def train_pipeline(args):
     
     dataset = NeRFDataset(args.basedir, split='train')
     H, W, focal = dataset.H, dataset.W, dataset.focal
-    K = np.array([
+    K = torch.tensor([
         [focal, 0, 0.5*W],
         [0, focal, 0.5*H],
         [0, 0, 1]
-    ])
+    ], dtype=torch.float32, device=device)
 
-    embed_fn, input_ch = PositionalEncoding(args.multires), 63 
-    embeddirs_fn, input_ch_views = PositionalEncoding(args.multires_views), 27
-    
+    embed_fn = PositionalEncoding(args.multires).to(device)
+    embeddirs_fn = PositionalEncoding(args.multires_views).to(device)
+    input_ch = embed_fn.out_dim
+    input_ch_views = embeddirs_fn.out_dim
+
     model = NeRF(D=8, W=256, input_ch=input_ch, input_ch_views=input_ch_views, output_ch=4).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lrate)
 
     N_rand = args.N_rand
-    
+
     def network_query_fn(pts, viewdirs, network):
-        return network(torch.cat([pts, viewdirs], -1)) 
+        # pts: [..., N_samples, 3], viewdirs: [..., 3] (same for all samples on a ray)
+        flat = pts.reshape(-1, 3)
+        viewdirs_expanded = viewdirs.unsqueeze(-2).expand_as(pts).reshape(-1, 3)
+        embedded_pts = embed_fn(flat)
+        embedded_dirs = embeddirs_fn(viewdirs_expanded)
+        raw = network(torch.cat([embedded_pts, embedded_dirs], -1))
+        return raw.reshape(*pts.shape[:-1], 4) 
 
     for i in range(args.N_iters):
         img_i = np.random.choice(len(dataset))
@@ -52,3 +60,6 @@ def train_pipeline(args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        if (i + 1) % 5000 == 0 or i == 0:
+            print(f"iter {i+1}/{args.N_iters} loss={loss.item():.6f}")
